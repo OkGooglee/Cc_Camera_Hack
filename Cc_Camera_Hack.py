@@ -47,6 +47,7 @@ DEFAULT_CREDENTIALS = [
     ("admin", "admin1122"),
     ("admin", "12345"),
     ("admin", "123456"),
+    ("admin", "12345678"),
     ("admin", "password"),
 ]
 
