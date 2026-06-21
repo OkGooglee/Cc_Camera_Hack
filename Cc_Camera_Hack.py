@@ -35,6 +35,7 @@ except ImportError:
         YELLOW = '\033[93m'
         CYAN = '\033[96m'
         WHITE = '\033[97m'
+        MAGENTA = '\033[95m'
     class Style:
         RESET_ALL = '\033[0m'
 
@@ -105,6 +106,7 @@ total_ips = 0
 start_time = time.time()
 selected_country = None
 cctv_output_file = None
+ip_range_output_file = None
 
 # Global counters for scan statistics
 found_count = 0
@@ -147,6 +149,16 @@ def update_status():
         sys.stdout.write(status)
         sys.stdout.flush()
         last_update_time = current_time
+
+
+def get_next_filename(base_name: str = "scan_result") -> str:
+    """Get next available filename like 1.txt, 2.txt, etc."""
+    i = 1
+    while True:
+        filename = f"{i}.txt"
+        if not os.path.exists(filename):
+            return filename
+        i += 1
 
 
 def ip_range_to_list(start_ip: str, end_ip: str) -> List[str]:
@@ -887,7 +899,7 @@ def scan_single_ip(ip: str, credentials: List[Tuple[str, str]], ports: List[int]
     Returns:
         Dictionary with results or None if no camera found
     """
-    global scanned_count, total_ips
+    global scanned_count, total_ips, ip_range_output_file
     
     try:
         # Update status line
@@ -926,6 +938,24 @@ def scan_single_ip(ip: str, credentials: List[Tuple[str, str]], ports: List[int]
                         scanned_count += 1
                     print()
                     print(f"{Fore.GREEN}[✓] Found! {Fore.YELLOW}Anjhua-Dahua{Style.RESET_ALL} {Fore.CYAN}{ip}:{detected_port}{Style.RESET_ALL} {Fore.GREEN}{username}:{password}{Style.RESET_ALL}")
+                    
+                    # Save to file
+                    if ip_range_output_file:
+                        try:
+                            with open(ip_range_output_file, 'a', encoding='utf-8') as f:
+                                f.write(f"{'='*60}\n")
+                                f.write(f"Camera Type: Anjhua-Dahua Technology Camera\n")
+                                f.write(f"IP Address: {ip}\n")
+                                f.write(f"Port: {detected_port}\n")
+                                f.write(f"Username: {username}\n")
+                                f.write(f"Password: {password}\n")
+                                f.write(f"URL: http://{ip}:{detected_port}\n")
+                                f.write(f"Detection Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                                f.write(f"{'='*60}\n\n")
+                                f.flush()
+                        except:
+                            pass
+                    
                     update_status()
                     return {
                         'ip': ip,
@@ -946,6 +976,24 @@ def scan_single_ip(ip: str, credentials: List[Tuple[str, str]], ports: List[int]
                         scanned_count += 1
                     print()
                     print(f"{Fore.GREEN}[✓] Found! {Fore.YELLOW}HIK Vision{Style.RESET_ALL} {Fore.CYAN}{ip}:{detected_port}{Style.RESET_ALL} {Fore.GREEN}{username}:{password}{Style.RESET_ALL}")
+                    
+                    # Save to file
+                    if ip_range_output_file:
+                        try:
+                            with open(ip_range_output_file, 'a', encoding='utf-8') as f:
+                                f.write(f"{'='*60}\n")
+                                f.write(f"Camera Type: HIK Vision Camera\n")
+                                f.write(f"IP Address: {ip}\n")
+                                f.write(f"Port: {detected_port}\n")
+                                f.write(f"Username: {username}\n")
+                                f.write(f"Password: {password}\n")
+                                f.write(f"URL: http://{ip}:{detected_port}\n")
+                                f.write(f"Detection Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                                f.write(f"{'='*60}\n\n")
+                                f.flush()
+                        except:
+                            pass
+                    
                     update_status()
                     return {
                         'ip': ip,
@@ -966,6 +1014,24 @@ def scan_single_ip(ip: str, credentials: List[Tuple[str, str]], ports: List[int]
                         scanned_count += 1
                     print()
                     print(f"{Fore.GREEN}[✓] Found! {Fore.YELLOW}Anjhua-Dahua{Style.RESET_ALL} {Fore.CYAN}{ip}:{detected_port}{Style.RESET_ALL} {Fore.GREEN}{username}:{password}{Style.RESET_ALL}")
+                    
+                    # Save to file
+                    if ip_range_output_file:
+                        try:
+                            with open(ip_range_output_file, 'a', encoding='utf-8') as f:
+                                f.write(f"{'='*60}\n")
+                                f.write(f"Camera Type: Anjhua-Dahua Technology Camera\n")
+                                f.write(f"IP Address: {ip}\n")
+                                f.write(f"Port: {detected_port}\n")
+                                f.write(f"Username: {username}\n")
+                                f.write(f"Password: {password}\n")
+                                f.write(f"URL: http://{ip}:{detected_port}\n")
+                                f.write(f"Detection Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                                f.write(f"{'='*60}\n\n")
+                                f.flush()
+                        except:
+                            pass
+                    
                     update_status()
                     return {
                         'ip': ip,
@@ -999,7 +1065,7 @@ def scan_ip_range(start_ip: str, end_ip: str, credentials: List[Tuple[str, str]]
         credentials: List of credentials to try
         max_workers: Number of threads (None = auto-detect CPU count)
     """
-    global total_ips, scanned_count, valid_results, start_time, found_count, rejected_count, login_success_count
+    global total_ips, scanned_count, valid_results, start_time, found_count, rejected_count, login_success_count, ip_range_output_file
     
     # Reset counters
     found_count = 0
@@ -1013,6 +1079,10 @@ def scan_ip_range(start_ip: str, end_ip: str, credentials: List[Tuple[str, str]]
     if total_ips == 0:
         print(f"{Fore.RED}[!] Invalid IP range!{Style.RESET_ALL}")
         return
+    
+    # Get next available filename
+    ip_range_output_file = get_next_filename()
+    print(f"{Fore.CYAN}[*] Results will be saved to: {Fore.YELLOW}{ip_range_output_file}{Style.RESET_ALL}")
     
     # Ports to scan (most common camera ports first for faster detection)
     # Order: most common ports first (37777=Dahua, 554=RTSP, 80=HTTP most common)
@@ -1036,6 +1106,13 @@ def scan_ip_range(start_ip: str, end_ip: str, credentials: List[Tuple[str, str]]
     valid_results.clear()
     scanned_count = 0
     
+    # Clear output file
+    try:
+        if os.path.exists(ip_range_output_file):
+            os.remove(ip_range_output_file)
+    except:
+        pass
+    
     print(f"{Fore.GREEN}Scanning... Press Ctrl+C to stop{Style.RESET_ALL}\n")
     
     # Use ThreadPoolExecutor for parallel scanning
@@ -1053,6 +1130,9 @@ def scan_ip_range(start_ip: str, end_ip: str, credentials: List[Tuple[str, str]]
                 if result:
                     with results_lock:
                         valid_results.append(result)
+                        found_count += 1
+                    # Update status to show found count
+                    update_status()
             except Exception:
                 pass
     
@@ -1061,13 +1141,14 @@ def scan_ip_range(start_ip: str, end_ip: str, credentials: List[Tuple[str, str]]
     print(f"\n\n{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
     print(f"{Fore.GREEN}📊 SCAN COMPLETE{Style.RESET_ALL}")
     print(f"{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
-    print(f"Total IPs: {scanned_count}")
+    print(f"Total IPs scanned: {scanned_count}")
     print(f"Found: {Fore.GREEN}{found_count}{Style.RESET_ALL}")
     print(f"Rejected: {Fore.RED}{rejected_count}{Style.RESET_ALL}")
-    print(f"Login Success: {Fore.GREEN}{login_success_count}{Style.RESET_ALL}")
+    print(f"Login Success: {Fore.MAGENTA}{login_success_count}{Style.RESET_ALL}")
     print(f"Time: {elapsed:.2f}s")
     if elapsed > 0:
         print(f"Speed: {scanned_count/elapsed:.1f} IP/s")
+    print(f"Results saved to: {Fore.YELLOW}{ip_range_output_file}{Style.RESET_ALL}")
     print(f"{Fore.CYAN}{'='*50}{Style.RESET_ALL}\n")
 
 
@@ -1432,7 +1513,7 @@ def scan_country_cameras(country: dict, credentials: List[Tuple[str, str]], max_
     print(f"Total IPs scanned: {scanned_count}")
     print(f"Found: {Fore.GREEN}{found_count}{Style.RESET_ALL}")
     print(f"Rejected: {Fore.RED}{rejected_count}{Style.RESET_ALL}")
-    print(f"Login Success: {Fore.GREEN}{login_success_count}{Style.RESET_ALL}")
+    print(f"Login Success: {Fore.MAGENTA}{login_success_count}{Style.RESET_ALL}")
     print(f"Time: {elapsed:.2f}s")
     if elapsed > 0:
         print(f"Speed: {scanned_count/elapsed:.1f} IP/s")
@@ -2167,7 +2248,6 @@ def main():
         print(f"{Fore.RED}[!] Invalid choice!{Style.RESET_ALL}")
         sys.exit(1)
     
-    # Summary is handled within each function, so we don't need a global summary here
     sys.exit(0)
 
 
