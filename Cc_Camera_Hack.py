@@ -1,3 +1,10 @@
+#!/usr/bin/env python3
+"""
+Unified Camera Login Valid Checker
+Supports both Hikvision and Dahua/Anjhua cameras
+Auto-detects camera type and validates credentials
+"""
+
 import socket
 import base64
 import time
@@ -1884,9 +1891,18 @@ def get_country(ip):
 
 
 def print_banner():
-   
+    """Display main banner - same style as W8CameraHackV2.py"""
+    banner = f"""
+╔═══════════════════════════════════════╗
+║   Camera Login Valid Checker v3.0     ║
+║   W8Team - IP Scanner & Collector     ║
+║   Credit: W8Team/W8SOJIB              ║
+╚═══════════════════════════════════════╝
+"""
     print(f"{Fore.RED}{banner}{Style.RESET_ALL}")
-    print(f"{Fore.GREEN}[*] Developed by: {Fore.YELLOW}Charlie{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}[*] Developed by: {Fore.YELLOW}W8Team/W8SOJIB{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}[*] GitHub: {Fore.YELLOW}github.com/W8SOJIB{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}[*] Termux Supported ✓{Style.RESET_ALL}")
     print(f"{Fore.GREEN}[*] Supports: {Fore.YELLOW}Hikvision & Dahua/Anjhua Cameras{Style.RESET_ALL}\n")
 
 
