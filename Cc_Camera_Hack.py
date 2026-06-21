@@ -35,6 +35,7 @@ except ImportError:
         YELLOW = '\033[93m'
         CYAN = '\033[96m'
         WHITE = '\033[97m'
+        MAGENTA = '\033[95m'
     class Style:
         RESET_ALL = '\033[0m'
 
@@ -110,6 +111,7 @@ cctv_output_file = None
 found_count = 0
 rejected_count = 0  
 login_success_count = 0
+last_status_update = 0
 
 
 def ip_range_to_list(start_ip: str, end_ip: str) -> List[str]:
@@ -440,6 +442,45 @@ class DahuaCameraValidator:
         return success, message
 
 
+def update_status_line():
+    """Update the status line with current progress (thread-safe)"""
+    global last_status_update
+    current_time = time.time()
+    
+    # Update at most 10 times per second to avoid flickering
+    if current_time - last_status_update < 0.05:
+        return
+    
+    with results_lock:
+        current = scanned_count
+        total = total_ips
+        found = found_count
+        rejected = rejected_count
+        login_success = login_success_count
+    
+    if total > 0:
+        percentage = (current / total) * 100
+        elapsed = time.time() - start_time
+        speed = current / elapsed if elapsed > 0 else 0
+        
+        # Create progress bar
+        bar_length = 30
+        filled = int(bar_length * current / total)
+        bar = '█' * filled + '░' * (bar_length - filled)
+        
+        # Format status line with all information
+        status = f"{Fore.CYAN}[*] {bar} {percentage:.1f}%{Style.RESET_ALL} "
+        status += f"{Fore.GREEN}Found: {found}{Style.RESET_ALL} "
+        status += f"{Fore.RED}Rejected: {rejected}{Style.RESET_ALL} "
+        status += f"{Fore.MAGENTA}Login Success: {login_success}{Style.RESET_ALL} "
+        status += f"{Fore.YELLOW}{current}/{total}{Style.RESET_ALL} "
+        status += f"{Fore.WHITE}[{speed:.1f} IP/s]{Style.RESET_ALL}"
+        
+        sys.stdout.write(f"\r{status}")
+        sys.stdout.flush()
+        last_status_update = current_time
+
+
 def scan_single_ip_detection_only(ip: str, ports: List[int]) -> Optional[dict]:
     """
     Fast camera detection only (no login attempt) - Phase 1
@@ -448,13 +489,8 @@ def scan_single_ip_detection_only(ip: str, ports: List[int]) -> Optional[dict]:
     global scanned_count, total_ips, cctv_output_file, found_count, rejected_count
     
     try:
-        # Show IP being scanned with counts
-        with results_lock:
-            current = scanned_count + 1
-            total = total_ips
-            found = found_count
-            rejected = rejected_count
-        print(f"{Fore.CYAN}[*] [{current}/{total}] Scanning: {ip} | Found: {Fore.GREEN}{found}{Fore.CYAN} | Rejected: {Fore.RED}{rejected}{Fore.CYAN}{Style.RESET_ALL}", end='\r', flush=True)
+        # Update status line
+        update_status_line()
         
         # Fast port scan first
         open_ports = fast_port_scan(ip, ports, timeout=0.15)
@@ -511,23 +547,27 @@ def scan_single_ip_detection_only(ip: str, ports: List[int]) -> Optional[dict]:
                 except:
                     pass
             
-            # Display detection with updated counts
+            # Update counts
             with results_lock:
                 scanned_count += 1
                 found_count += 1
-                current = scanned_count
-                total = total_ips
-                found = found_count
-                rejected = rejected_count
             
-            print()  # New line after in-progress message
+            # Print found camera with clear formatting
+            print()  # New line after status line
             print(f"{Fore.GREEN}[✓] Camera Found!{Style.RESET_ALL}")
             print(f"    Camera Type: {Fore.YELLOW}{camera_type}{Style.RESET_ALL}")
             print(f"    IP Address: {Fore.CYAN}{ip}{Style.RESET_ALL}")
             print(f"    Port: {detected_port}")
             print(f"    URL: {url}")
             print(f"    Detection Time: {detection_time}")
-            print(f"    Status: {Fore.GREEN}Found {found}{Fore.CYAN} | Rejected: {Fore.RED}{rejected}{Fore.CYAN} | Total: {current}/{total}{Style.RESET_ALL}\n")
+            
+            # Show updated stats
+            with results_lock:
+                current = scanned_count
+                total = total_ips
+                found = found_count
+                rejected = rejected_count
+            print(f"    Status: {Fore.GREEN}Found: {found}{Style.RESET_ALL} | {Fore.RED}Rejected: {rejected}{Style.RESET_ALL} | {current}/{total} ({current/total*100:.1f}%)\n")
             
             return {
                 'ip': ip,
@@ -557,14 +597,8 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]], p
     global scanned_count, total_ips, cctv_output_file, found_count, rejected_count, login_success_count
     
     try:
-        # Show IP being scanned with counts
-        with results_lock:
-            current = scanned_count + 1
-            total = total_ips
-            found = found_count
-            rejected = rejected_count
-            login_success = login_success_count
-        print(f"{Fore.CYAN}[*] [{current}/{total}] Scanning: {ip} | Found: {Fore.GREEN}{found}{Fore.CYAN} | Rejected: {Fore.RED}{rejected}{Fore.CYAN} | Login Success: {Fore.GREEN}{login_success}{Fore.CYAN}{Style.RESET_ALL}", end='\r', flush=True)
+        # Update status line
+        update_status_line()
         
         # Fast port scan first
         open_ports = fast_port_scan(ip, ports, timeout=0.15)
@@ -596,14 +630,14 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]], p
                     detected_port = port
                     break
         
-            # If still not detected, assume based on port
+        # If still not detected, assume based on port
         if not camera_found:
             if detected_port in [37777, 554]:
                 camera_type = "Anjhua-Dahua Technology Camera"
                 camera_found = True
             elif detected_port in [80, 443, 8000, 8080]:
                 # Camera port found but type unknown - will try login to determine
-                camera_found = True  # We'll try login but won't save until type is confirmed
+                camera_found = True
         
         if camera_found:
             url = f"http://{ip}:{detected_port}" if detected_port == 8080 else f"http://{ip}"
@@ -626,36 +660,28 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]], p
                     except:
                         pass
                 
-                # Display detection with counts
+                # Update counts
                 with results_lock:
                     found_count += 1
-                    current = scanned_count + 1
-                    total = total_ips
-                    found = found_count
-                    rejected = rejected_count
-                    login_success = login_success_count
                 
-                print()  # New line after in-progress message
+                # Print detection
+                print()  # New line after status line
                 print(f"{Fore.GREEN}[✓] Camera Detected!{Style.RESET_ALL}")
                 print(f"    Camera Type: {Fore.YELLOW}{camera_type}{Style.RESET_ALL}")
                 print(f"    IP Address: {Fore.CYAN}{ip}{Style.RESET_ALL}")
                 print(f"    Port: {detected_port}")
                 print(f"    URL: {url}")
                 print(f"    Detection Time: {detection_time}")
-                print(f"    Status: Found: {Fore.GREEN}{found}{Fore.CYAN} | Rejected: {Fore.RED}{rejected}{Fore.CYAN} | Login Success: {Fore.GREEN}{login_success}{Fore.CYAN} | Total: {current}/{total}{Style.RESET_ALL}")
             else:
                 # Camera port found but type unknown - try login first
-                print()  # New line after in-progress message
+                print()  # New line after status line
                 with results_lock:
-                    current = scanned_count + 1
-                    total = total_ips
                     found = found_count
                     rejected = rejected_count
-                    login_success = login_success_count
+                    current = scanned_count + 1
+                    total = total_ips
                 print(f"{Fore.CYAN}[*] Camera port found at {ip}:{detected_port}, detecting type via login...{Style.RESET_ALL}")
-                print(f"    Status: Found: {Fore.GREEN}{found}{Fore.CYAN} | Rejected: {Fore.RED}{rejected}{Fore.CYAN} | Login Success: {Fore.GREEN}{login_success}{Fore.CYAN} | Total: {current}/{total}{Style.RESET_ALL}")
-            
-            print(f"{Fore.CYAN}[*] Trying login credentials...{Style.RESET_ALL}")
+                print(f"    Status: {Fore.GREEN}Found: {found}{Style.RESET_ALL} | {Fore.RED}Rejected: {rejected}{Style.RESET_ALL} | {current}/{total} ({current/total*100:.1f}%)")
             
             # Now try credentials
             # Determine if we should try Dahua first based on port or detected type
@@ -706,8 +732,11 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]], p
                             found = found_count
                             rejected = rejected_count
                             login_success = login_success_count
-                        print(f"{Fore.GREEN}[✓] LOGIN SUCCESS! Username: {username}, Password: {password}{Style.RESET_ALL}")
-                        print(f"    Status: Found: {Fore.GREEN}{found}{Fore.CYAN} | Rejected: {Fore.RED}{rejected}{Fore.CYAN} | Login Success: {Fore.GREEN}{login_success}{Fore.CYAN} | Total: {current}/{total}{Style.RESET_ALL}\n")
+                        
+                        print(f"{Fore.GREEN}[✓] LOGIN SUCCESS! {Fore.YELLOW}{username}:{password}{Style.RESET_ALL}")
+                        print(f"    Camera: {Fore.CYAN}{camera_type}{Style.RESET_ALL}")
+                        print(f"    IP: {Fore.CYAN}{ip}:{detected_port}{Style.RESET_ALL}")
+                        print(f"    Status: {Fore.GREEN}Found: {found}{Style.RESET_ALL} | {Fore.RED}Rejected: {rejected}{Style.RESET_ALL} | {Fore.MAGENTA}Login Success: {login_success}{Style.RESET_ALL} | {current}/{total} ({current/total*100:.1f}%)\n")
                         return {
                             'ip': ip,
                             'username': username,
@@ -762,8 +791,11 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]], p
                             found = found_count
                             rejected = rejected_count
                             login_success = login_success_count
-                        print(f"{Fore.GREEN}[✓] LOGIN SUCCESS! Username: {username}, Password: {password}{Style.RESET_ALL}")
-                        print(f"    Status: Found: {Fore.GREEN}{found}{Fore.CYAN} | Rejected: {Fore.RED}{rejected}{Fore.CYAN} | Login Success: {Fore.GREEN}{login_success}{Fore.CYAN} | Total: {current}/{total}{Style.RESET_ALL}\n")
+                        
+                        print(f"{Fore.GREEN}[✓] LOGIN SUCCESS! {Fore.YELLOW}{username}:{password}{Style.RESET_ALL}")
+                        print(f"    Camera: {Fore.CYAN}{camera_type}{Style.RESET_ALL}")
+                        print(f"    IP: {Fore.CYAN}{ip}:{detected_port}{Style.RESET_ALL}")
+                        print(f"    Status: {Fore.GREEN}Found: {found}{Style.RESET_ALL} | {Fore.RED}Rejected: {rejected}{Style.RESET_ALL} | {Fore.MAGENTA}Login Success: {login_success}{Style.RESET_ALL} | {current}/{total} ({current/total*100:.1f}%)\n")
                         return {
                             'ip': ip,
                             'username': username,
@@ -817,8 +849,11 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]], p
                             found = found_count
                             rejected = rejected_count
                             login_success = login_success_count
-                        print(f"{Fore.GREEN}[✓] LOGIN SUCCESS! Username: {username}, Password: {password}{Style.RESET_ALL}")
-                        print(f"    Status: Found: {Fore.GREEN}{found}{Fore.CYAN} | Rejected: {Fore.RED}{rejected}{Fore.CYAN} | Login Success: {Fore.GREEN}{login_success}{Fore.CYAN} | Total: {current}/{total}{Style.RESET_ALL}\n")
+                        
+                        print(f"{Fore.GREEN}[✓] LOGIN SUCCESS! {Fore.YELLOW}{username}:{password}{Style.RESET_ALL}")
+                        print(f"    Camera: {Fore.CYAN}{camera_type}{Style.RESET_ALL}")
+                        print(f"    IP: {Fore.CYAN}{ip}:{detected_port}{Style.RESET_ALL}")
+                        print(f"    Status: {Fore.GREEN}Found: {found}{Style.RESET_ALL} | {Fore.RED}Rejected: {rejected}{Style.RESET_ALL} | {Fore.MAGENTA}Login Success: {login_success}{Style.RESET_ALL} | {current}/{total} ({current/total*100:.1f}%)\n")
                         return {
                             'ip': ip,
                             'username': username,
@@ -839,8 +874,9 @@ def scan_single_ip_with_detection(ip: str, credentials: List[Tuple[str, str]], p
                 found = found_count
                 rejected = rejected_count
                 login_success = login_success_count
+            
             print(f"{Fore.YELLOW}[-] No valid credentials found for {ip}{Style.RESET_ALL}")
-            print(f"    Status: Found: {Fore.GREEN}{found}{Fore.CYAN} | Rejected: {Fore.RED}{rejected}{Fore.CYAN} | Login Success: {Fore.GREEN}{login_success}{Fore.CYAN} | Total: {current}/{total}{Style.RESET_ALL}\n")
+            print(f"    Status: {Fore.GREEN}Found: {found}{Style.RESET_ALL} | {Fore.RED}Rejected: {rejected}{Style.RESET_ALL} | {Fore.MAGENTA}Login Success: {login_success}{Style.RESET_ALL} | {current}/{total} ({current/total*100:.1f}%)\n")
             return None
         
         with results_lock:
@@ -871,11 +907,8 @@ def scan_single_ip(ip: str, credentials: List[Tuple[str, str]], ports: List[int]
     global scanned_count, total_ips
     
     try:
-        # Show IP being scanned
-        with results_lock:
-            current = scanned_count + 1
-            total = total_ips
-        print(f"{Fore.CYAN}[*] [{current}/{total}] Scanning: {ip}{Style.RESET_ALL}", end='\r', flush=True)
+        # Update status line
+        update_status_line()
         
         # Ultra-fast parallel port scan
         open_ports = fast_port_scan(ip, ports, timeout=0.15)  # Ultra-short timeout
@@ -883,7 +916,6 @@ def scan_single_ip(ip: str, credentials: List[Tuple[str, str]], ports: List[int]
         if not open_ports:
             with results_lock:
                 scanned_count += 1
-            print(f"{Fore.YELLOW}[-] [{scanned_count}/{total_ips}] {ip}: No open ports{Style.RESET_ALL}")
             return None
         
         # Check if ports indicate camera (80, 443, 554, 37777, 8000)
@@ -892,15 +924,12 @@ def scan_single_ip(ip: str, credentials: List[Tuple[str, str]], ports: List[int]
         if not camera_ports:
             with results_lock:
                 scanned_count += 1
-            print(f"{Fore.YELLOW}[-] [{scanned_count}/{total_ips}] {ip}: No camera ports{Style.RESET_ALL}")
             return None
         
         # Skip slow detection - use port-based quick detection
         detected_port = camera_ports[0]
         # Quick port-based detection: 37777/554 = Dahua, others = try both
         is_dahua = detected_port in [37777, 554]
-        
-        print(f"{Fore.CYAN}[*] [{scanned_count + 1}/{total_ips}] {ip}: Camera port found ({detected_port}), trying login...{Style.RESET_ALL}", end='\r', flush=True)
         
         # Try credentials immediately - try Dahua first if port suggests it, otherwise try both
         for username, password in credentials:
@@ -912,7 +941,7 @@ def scan_single_ip(ip: str, credentials: List[Tuple[str, str]], ports: List[int]
                 if success:
                     with results_lock:
                         scanned_count += 1
-                    print()  # New line after in-progress message
+                    print()  # New line after status line
                     return {
                         'ip': ip,
                         'username': username,
@@ -930,7 +959,7 @@ def scan_single_ip(ip: str, credentials: List[Tuple[str, str]], ports: List[int]
                 if success:
                     with results_lock:
                         scanned_count += 1
-                    print()  # New line after in-progress message
+                    print()  # New line after status line
                     return {
                         'ip': ip,
                         'username': username,
@@ -948,7 +977,7 @@ def scan_single_ip(ip: str, credentials: List[Tuple[str, str]], ports: List[int]
                 if success:
                     with results_lock:
                         scanned_count += 1
-                    print()  # New line after in-progress message
+                    print()  # New line after status line
                     return {
                         'ip': ip,
                         'username': username,
@@ -962,14 +991,12 @@ def scan_single_ip(ip: str, credentials: List[Tuple[str, str]], ports: List[int]
         # No valid credentials found
         with results_lock:
             scanned_count += 1
-        print(f"{Fore.YELLOW}[-] [{scanned_count}/{total_ips}] {ip}: No valid credentials{Style.RESET_ALL}")
         return None
         
     except Exception as e:
         # Catch any unexpected errors to prevent hanging
         with results_lock:
             scanned_count += 1
-        print(f"{Fore.YELLOW}[-] [{scanned_count}/{total_ips}] {ip}: Error - {str(e)[:30]}{Style.RESET_ALL}")
         return None
 
 
@@ -983,7 +1010,12 @@ def scan_ip_range(start_ip: str, end_ip: str, credentials: List[Tuple[str, str]]
         credentials: List of credentials to try
         max_workers: Number of threads (None = auto-detect CPU count)
     """
-    global total_ips, scanned_count, valid_results, start_time
+    global total_ips, scanned_count, valid_results, start_time, found_count, rejected_count, login_success_count
+    
+    # Reset counters
+    found_count = 0
+    rejected_count = 0
+    login_success_count = 0
     
     # Generate IP list
     ip_list = ip_range_to_list(start_ip, end_ip)
@@ -1015,6 +1047,8 @@ def scan_ip_range(start_ip: str, end_ip: str, credentials: List[Tuple[str, str]]
     valid_results.clear()
     scanned_count = 0
     
+    print(f"{Fore.GREEN}[*] Starting scan... Press Ctrl+C to stop{Style.RESET_ALL}\n")
+    
     # Use ThreadPoolExecutor for parallel scanning
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all IP scanning tasks
@@ -1033,7 +1067,7 @@ def scan_ip_range(start_ip: str, end_ip: str, credentials: List[Tuple[str, str]]
                         valid_results.append(result)
                     
                     # Print valid result immediately
-                    print()  # New line after in-progress message
+                    print()  # New line after status line
                     print(f"{Fore.GREEN}[✓] FOUND CAMERA!{Style.RESET_ALL}")
                     print(f"    IP: {Fore.CYAN}{result['ip']}{Style.RESET_ALL}")
                     print(f"    Type: {Fore.YELLOW}{result['camera_type']}{Style.RESET_ALL}")
@@ -1046,6 +1080,20 @@ def scan_ip_range(start_ip: str, end_ip: str, credentials: List[Tuple[str, str]]
             except Exception as e:
                 # Silently handle errors for speed
                 pass
+    
+    # Print final summary
+    elapsed = time.time() - start_time
+    print(f"\n{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}📊 SCAN COMPLETE{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
+    print(f"Total IPs scanned: {scanned_count}")
+    print(f"Total found: {Fore.GREEN}{found_count}{Style.RESET_ALL}")
+    print(f"Total rejected: {Fore.RED}{rejected_count}{Style.RESET_ALL}")
+    print(f"Total login success: {Fore.MAGENTA}{login_success_count}{Style.RESET_ALL}")
+    print(f"Time elapsed: {elapsed:.2f} seconds")
+    if elapsed > 0:
+        print(f"Scan speed: {scanned_count/elapsed:.1f} IP/s")
+    print(f"{Fore.CYAN}{'='*50}{Style.RESET_ALL}\n")
 
 
 def print_country_menu():
@@ -1213,11 +1261,12 @@ def scan_country_cameras_detection_only(country: dict, max_workers: int = None):
     """
     Phase 1: Fast camera detection only (no login) - Save to txt
     """
-    global total_ips, scanned_count, valid_results, start_time, cctv_output_file, found_count, rejected_count
+    global total_ips, scanned_count, valid_results, start_time, cctv_output_file, found_count, rejected_count, login_success_count
     
     # Initialize counters
     found_count = 0
     rejected_count = 0
+    login_success_count = 0
     
     country_file = country['file']
     # Use script directory for output file
@@ -1275,6 +1324,7 @@ def scan_country_cameras_detection_only(country: dict, max_workers: int = None):
     start_time = time.time()
     valid_results.clear()
     scanned_count = 0
+    last_status_update = 0
     
     # Clear output file
     try:
@@ -1301,7 +1351,8 @@ def scan_country_cameras_detection_only(country: dict, max_workers: int = None):
             except Exception:
                 pass
     
-    # Print summary with all counts
+    # Print final summary with progress bar
+    print()  # New line after status
     elapsed = time.time() - start_time
     print(f"\n{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
     print(f"{Fore.GREEN}📊 SCAN COMPLETE{Style.RESET_ALL}")
@@ -1384,6 +1435,7 @@ def scan_country_cameras(country: dict, credentials: List[Tuple[str, str]], max_
     start_time = time.time()
     valid_results.clear()
     scanned_count = 0
+    last_status_update = 0
     
     # Clear output file
     try:
@@ -1408,7 +1460,8 @@ def scan_country_cameras(country: dict, credentials: List[Tuple[str, str]], max_
             except Exception:
                 pass
     
-    # Print summary with all counts
+    # Print final summary with progress bar
+    print()  # New line after status
     elapsed = time.time() - start_time
     print(f"\n{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
     print(f"{Fore.GREEN}📊 SCAN COMPLETE{Style.RESET_ALL}")
@@ -1416,7 +1469,7 @@ def scan_country_cameras(country: dict, credentials: List[Tuple[str, str]], max_
     print(f"Total IPs scanned: {scanned_count}")
     print(f"Total IPs rejected: {Fore.RED}{rejected_count}{Style.RESET_ALL}")
     print(f"Total Cameras Detected: {Fore.GREEN}{found_count}{Style.RESET_ALL}")
-    print(f"Total Login Success: {Fore.GREEN}{login_success_count}{Style.RESET_ALL}")
+    print(f"Total Login Success: {Fore.MAGENTA}{login_success_count}{Style.RESET_ALL}")
     print(f"Time elapsed: {elapsed:.2f} seconds")
     if elapsed > 0:
         print(f"Scan speed: {scanned_count/elapsed:.1f} IP/s")
@@ -1692,7 +1745,12 @@ def brute_force_from_file(file_path: str, credentials: List[Tuple[str, str]], ma
     Phase 2: Read saved cameras from file and try login credentials
     Saves valid logins to ValidCamera.txt with geographic information
     """
-    global valid_results, start_time
+    global valid_results, start_time, found_count, rejected_count, login_success_count
+    
+    # Reset counters
+    found_count = 0
+    rejected_count = 0
+    login_success_count = 0
     
     print(f"\n{Fore.CYAN}{'='*50}{Style.RESET_ALL}")
     print(f"{Fore.GREEN}[*] Login Check - Brute Force from Saved Cameras{Style.RESET_ALL}")
@@ -1766,7 +1824,7 @@ def brute_force_from_file(file_path: str, credentials: List[Tuple[str, str]], ma
                 success, message = validator.validate()
                 
                 if success:
-                    print(f"{Fore.GREEN}[✓] LOGIN SUCCESS!{Style.RESET_ALL} {ip}:{port} - {username}:{password}")
+                    print(f"\n{Fore.GREEN}[✓] LOGIN SUCCESS!{Style.RESET_ALL} {ip}:{port} - {username}:{password}")
                     # Get geographic location (with small delay to avoid rate limiting)
                     time.sleep(0.1)  # Small delay to avoid rate limiting
                     geo_info = get_geographic_location(ip)
@@ -1789,7 +1847,7 @@ def brute_force_from_file(file_path: str, credentials: List[Tuple[str, str]], ma
                     
                     if success:
                         camera_type = "Anjhua-Dahua Technology Camera"
-                        print(f"{Fore.GREEN}[✓] LOGIN SUCCESS!{Style.RESET_ALL} {ip}:{port} - {username}:{password}")
+                        print(f"\n{Fore.GREEN}[✓] LOGIN SUCCESS!{Style.RESET_ALL} {ip}:{port} - {username}:{password}")
                         # Get geographic location (with small delay to avoid rate limiting)
                         time.sleep(0.1)  # Small delay to avoid rate limiting
                         geo_info = get_geographic_location(ip)
@@ -1823,6 +1881,7 @@ def brute_force_from_file(file_path: str, credentials: List[Tuple[str, str]], ma
                 if result:
                     with results_lock:
                         valid_results.append(result)
+                        login_success_count += 1
                     
                     # Save valid login to file immediately
                     try:
@@ -2151,7 +2210,6 @@ def main():
         print(f"{Fore.RED}[!] Invalid choice!{Style.RESET_ALL}")
         sys.exit(1)
     
-    # Summary is handled within each function, so we don't need a global summary here
     sys.exit(0)
 
 
